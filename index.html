@@ -137,6 +137,8 @@
   .customer-row .right .last.rose{color:var(--rose);}
   .customer-row .right .last.emerald{color:var(--emerald);}
   .customer-row .left,.customer-row .right{min-width:0;overflow-wrap:anywhere;}
+  .customer-contact{display:flex;align-items:center;flex-wrap:wrap;gap:8px;}
+  .whatsapp-link{display:block;text-align:center;text-decoration:none;margin-bottom:14px;}
   .invoice-row{font-family:inherit;width:100%;text-align:right;color:inherit;gap:10px;}
   .invoice-row .sub{color:var(--muted);}
   .history-row.static{cursor:default;gap:10px;overflow-wrap:anywhere;}
@@ -982,16 +984,102 @@ function openCustomerForm(){
   };
 }
 
+function whatsappPhone(phone){
+  const compact = (phone || "")
+    .replace(/[٠-٩]/g, digit=>"٠١٢٣٤٥٦٧٨٩".indexOf(digit))
+    .replace(/[۰-۹]/g, digit=>"۰۱۲۳۴۵۶۷۸۹".indexOf(digit))
+    .replace(/[\s().\-\u061c\u200e\u200f]/g, "");
+  const international = compact.startsWith("+") || compact.startsWith("00");
+  const number = compact.replace(/^(?:\+|00)/, "");
+
+  if(number.startsWith("964")){
+    const mobile = number.slice(3).replace(/^0/, "");
+    return /^7\d{9}$/.test(mobile) ? "964"+mobile : "";
+  }
+  if(international) return /^[1-9]\d{6,14}$/.test(number) ? number : "";
+  if(/^0?7\d{9}$/.test(number)) return "964"+number.replace(/^0/, "");
+  return "";
+}
+
+function customerWhatsAppLink(phone, name, account, sales){
+  const purchases = sales.map(sale=>{
+    const products = sale.items.map(item=>`• ${item.name} × ${item.qty}`);
+    if(!products.length) products.push("تفاصيل الأصناف غير مسجّلة.");
+    return [`تاريخ الشراء: ${fmtDate(sale.date)}`, ...products].join("\n");
+  });
+  const message = [
+    "السلام عليكم ورحمة الله وبركاته",
+    `هلا ${name}، هذا كشف حساب مشترياتك:`,
+    "",
+    `إجمالي المشتريات: ${fmt(account.charged)} ${CURRENCY}`,
+    `المبلغ اللي سدّدته: ${fmt(account.paid)} ${CURRENCY}`,
+    `المبلغ المتبقي عليك: ${fmt(account.remaining)} ${CURRENCY}`,
+    "",
+    purchases.length ? purchases.join("\n\n") : "ماكو مشتريات مسجّلة.",
+    "",
+    "شكراً إلك."
+  ].join("\n");
+  return `https://wa.me/${phone}?text=${encodeURIComponent(message)}`;
+}
+
+function openCustomerPhoneForm(customer){
+  openSheet("رقم واتساب العميل", `
+    <form id="customer-phone-form">
+      <label class="field"><div class="field-label">رقم الهاتف</div>
+        <input class="in" id="customer-phone-input" type="tel" dir="ltr" value="${esc(customer.phone)}" placeholder="07XXXXXXXXX" required>
+      </label>
+      <button class="btn btn-primary btn-block" id="save-customer-phone">حفظ الرقم</button>
+    </form>
+  `);
+  const form = document.getElementById("customer-phone-form");
+  const input = document.getElementById("customer-phone-input");
+  input.focus();
+  input.oninput = ()=>input.setCustomValidity("");
+  form.onsubmit = async (event)=>{
+    event.preventDefault();
+    const phone = input.value.trim();
+    if(!whatsappPhone(phone)){
+      input.setCustomValidity("أدخل رقم موبايل عراقي أو رقم بالصيغة الدولية");
+      input.reportValidity();
+      return;
+    }
+    const owner = session?.user.id;
+    if(!owner) return;
+    const button = document.getElementById("save-customer-phone");
+    button.disabled = true;
+    try{
+      const {error} = await sb.from("customers").update({phone})
+        .eq("id", customer.id).eq("user_id", owner).select("id").single();
+      if(error) throw error;
+      if(session?.user.id !== owner) return;
+      state.data.customers = state.data.customers.map(c=>c.id===customer.id ? {...c,phone} : c);
+      render();
+      if(form.isConnected && document.getElementById("modal-root").classList.contains("open")){
+        openCustomerDetail(customer.id);
+      }
+    }catch(error){
+      console.error("تعذّر حفظ رقم الهاتف",error);
+      flashSaveError();
+      button.disabled = false;
+    }
+  };
+}
+
 function openCustomerDetail(id){
   const c = state.data.customers.find(x=>x.id===id);
   if(!c) return;
   const {byCustomer, bySale} = paymentSummary();
   const d = byCustomer.get(id);
   const sales = [...d.sales].reverse();
+  const phone = whatsappPhone(c.phone);
+  const whatsappLink = phone ? customerWhatsAppLink(phone, c.name, d, sales) : "";
 
   openSheet(c.name, `
     <div style="font-size:12.5px;color:var(--muted);margin-bottom:10px;">
-      ${c.phone?`<div>📞 ${esc(c.phone)}</div>`:""}
+      <div class="customer-contact">
+        ${c.phone?`<span>📞 <bdi>${esc(c.phone)}</bdi></span>`:""}
+        <button class="link-btn" id="edit-customer-phone">${c.phone?"تعديل الرقم":"إضافة رقم واتساب"}</button>
+      </div>
       ${c.location?`<div>📍 ${esc(c.location)}</div>`:""}
       ${c.note?`<div>${esc(c.note)}</div>`:""}
     </div>
@@ -1000,6 +1088,8 @@ function openCustomerDetail(id){
       <div class="kv"><span class="k">المدفوع</span><span class="v">${fmt(d.paid)} ${CURRENCY}</span></div>
       <div class="kv"><span class="k">المتبقي على العميل</span><span class="v ${d.remaining>0?"rose":"emerald"}">${fmt(d.remaining)} ${CURRENCY}</span></div>
     </div>
+    ${whatsappLink ? `<a class="btn btn-secondary whatsapp-link" id="customer-whatsapp"
+      href="${esc(whatsappLink)}" target="_blank" rel="noopener noreferrer">فتح كشف الحساب في واتساب</a>` : ""}
     ${d.remaining>0 ? `
       <form id="customer-payment-form" style="display:flex;gap:8px;margin-bottom:16px;">
         <input class="in" id="pay-amount" type="number" step="1" min="1" max="${d.remaining}" inputmode="numeric" aria-label="مبلغ الدفعة" placeholder="مبلغ الدفعة" required style="flex:1">
@@ -1014,6 +1104,7 @@ function openCustomerDetail(id){
     <div class="section-title">آخر الدفعات</div>
     ${paymentRows(d.payments)}
   `);
+  document.getElementById("edit-customer-phone").onclick = ()=>openCustomerPhoneForm(c);
   const form = document.getElementById("customer-payment-form");
   if(form) form.onsubmit = async (event)=>{
     event.preventDefault();
