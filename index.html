@@ -38,6 +38,7 @@
   .btn-ghost{background:var(--chip);color:var(--muted);}
   .btn-danger{background:var(--rose);color:#fff;}
   .btn-disabled{background:#DCD9D2;color:#fff;cursor:not-allowed;}
+  .btn:disabled{opacity:.58;cursor:not-allowed;}
   .link-btn{background:none;border:none;color:var(--teal);font-weight:700;font-size:13px;
     padding:0;cursor:pointer;font-family:inherit;}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
@@ -70,15 +71,24 @@
   .name{font-weight:700;font-size:14.5px;}
   .sub{font-size:11.5px;color:#B9BCB4;margin-top:1px;}
   .price{font-size:12px;color:var(--muted);margin-top:3px;}
-  .qty-badge{font-size:10.5px;font-weight:800;padding:3px 10px;border-radius:99px;
-    background:var(--emerald-soft);color:var(--emerald);white-space:nowrap;}
-  .qty-badge.low{background:var(--amber-soft);color:var(--amber);}
-  .row-actions{display:flex;gap:6px;margin-top:7px;justify-content:flex-end;}
+  .stock-row{width:100%;display:block;color:inherit;font:inherit;text-align:right;cursor:pointer;}
+  .stock-head{display:flex;align-items:center;gap:10px;margin-bottom:10px;}
+  .stock-head .name{overflow-wrap:anywhere;}
+  .stock-count{background:var(--chip);border-radius:var(--radius-sm);padding:7px 9px;}
+  .stock-count b{display:block;font-size:17px;color:var(--text);line-height:1.3;}
+  .stock-count span{display:block;color:var(--muted);font-size:11px;}
+  .stock-count.shop{background:var(--teal-soft);}
+  .stock-count.shop b{color:var(--teal);}
+  .stock-count.shop.low{background:var(--amber-soft);}
+  .stock-count.shop.low b{color:var(--amber);}
+  .stock-details{margin:0 0 14px;}
+  .stock-details .stock-count{padding:11px 13px;}
+  .stock-details .stock-count b{font-size:23px;}
+  .stock-actions{margin-bottom:14px;}
+  .stock-remove{display:flex;justify-content:flex-end;margin-top:14px;}
+  .stock-remove .link-btn{color:var(--rose);}
   .icon-btn{background:var(--chip);border:none;border-radius:9px;width:29px;height:29px;
     display:flex;align-items:center;justify-content:center;color:var(--muted);cursor:pointer;font-size:13px;}
-  .icon-btn.danger{color:var(--rose);}
-  .confirm-btn{background:var(--rose);color:#fff;border:none;border-radius:9px;
-    padding:0 10px;font-size:10.5px;font-weight:800;cursor:pointer;height:29px;}
   label.field{display:block;margin-bottom:13px;}
   .field-label{font-size:12px;font-weight:700;color:var(--muted);margin-bottom:6px;}
   .in{width:100%;background:#fff;border:1px solid var(--border);border-radius:var(--radius-sm);
@@ -306,19 +316,16 @@ function fmtDateTime(dateStr){
 
 let state = { data: { products: [], customers: [], sales: [], payments: [], expenses: null }, tab: "home", ready: false };
 let ui = {
-  productQuery: "", confirmDeleteId: null,
+  productQuery: "",
   cart: [], saleCustomerId: "", salePaid: "", saleDiscount: "0", saleDate: nowLocalInput(),
-  saleDone: false, editingSaleId: null,
+  saleDone: false, saleSaving: false, saleError: "", saleDraftId: null, editingSaleId: null,
   reportPeriod: "day",
   customerQuery: "", customerFilter: "all",
   invoiceQuery: "", confirmDeleteInvoiceId: null,
 };
 let charts = { trend: null, top: null };
 
-/* ---------------- DATA LAYER: full relational sync with Supabase ---------------- */
-// Each row-changing action in the app calls persist(nextFullState). We diff the
-// previous vs next state per-collection (by object identity, which the app's own
-// update code already preserves for untouched rows) and push only what changed.
+/* ---------------- DATA LAYER ---------------- */
 
 function diffById(prevArr, nextArr){
   const prevMap = new Map((prevArr||[]).map(x=>[x.id, x]));
@@ -334,23 +341,6 @@ function flashSaveError(){
   el.style.display = "block";
   clearTimeout(flashSaveError._t);
   flashSaveError._t = setTimeout(()=>{ el.style.display = "none"; }, 3500);
-}
-
-async function syncProducts(prevArr, nextArr, uid_){
-  const { removed, changed } = diffById(prevArr, nextArr);
-  if(removed.length){
-    const { error } = await sb.from("products").delete().in("id", removed);
-    if(error) throw error;
-  }
-  if(changed.length){
-    const rows = changed.map(p=>({
-      id: p.id, user_id: uid_, name: p.name, code: p.code || "",
-      buy_price: Number(p.buyPrice)||0, sell_price: Number(p.sellPrice)||0,
-      qty: Number(p.qty)||0, image_url: p.imageUrl || "",
-    }));
-    const { error } = await sb.from("products").upsert(rows);
-    if(error) throw error;
-  }
 }
 
 async function syncCustomers(prevArr, nextArr, uid_){
@@ -385,41 +375,35 @@ async function syncPayments(prevArr, nextArr, uid_){
   }
 }
 
-async function syncSales(prevArr, nextArr, uid_){
-  const { removed, changed } = diffById(prevArr, nextArr);
-  if(removed.length){
-    // sale_items rows cascade-delete automatically via FK when the sale is removed
-    const { error } = await sb.from("sales").delete().in("id", removed);
-    if(error) throw error;
-  }
-  if(changed.length){
-    const rows = changed.map(s=>({
-      id: s.id, user_id: uid_, customer_id: s.customerId || null, date: s.date,
-      total: Number(s.total)||0, discount: Number(s.discount)||0, paid: Number(s.paid)||0,
-    }));
-    const { error: saleErr } = await sb.from("sales").upsert(rows);
-    if(saleErr) throw saleErr;
+function productFromRow(p){
+  return {
+    id:p.id, name:p.name, code:p.code||"", buyPrice:Number(p.buy_price),
+    sellPrice:Number(p.sell_price), imageUrl:p.image_url||"",
+    qty:Number(p.qty), mainQty:Number(p.main_qty||0),
+    mainDamagedQty:Number(p.main_damaged_qty||0), mainWornQty:Number(p.main_worn_qty||0),
+    shopDamagedQty:Number(p.shop_damaged_qty||0), shopWornQty:Number(p.shop_worn_qty||0),
+  };
+}
 
-    // re-sync items only for the sales whose contents actually changed
-    const saleIds = changed.map(s=>s.id);
-    const { error: delErr } = await sb.from("sale_items").delete().in("sale_id", saleIds);
-    if(delErr) throw delErr;
+function saleItemFromRow(it){
+  return {productId:it.product_id, name:it.name, qty:Number(it.qty),
+    sellPrice:Number(it.sell_price), buyPrice:Number(it.buy_price)};
+}
 
-    const itemRows = [];
-    changed.forEach(s=>{
-      (s.items||[]).forEach(it=>{
-        itemRows.push({
-          id: uid(), user_id: uid_, sale_id: s.id, product_id: it.productId || null,
-          name: it.name, qty: Number(it.qty)||0,
-          sell_price: Number(it.sellPrice)||0, buy_price: Number(it.buyPrice)||0,
-        });
-      });
-    });
-    if(itemRows.length){
-      const { error: itemErr } = await sb.from("sale_items").insert(itemRows);
-      if(itemErr) throw itemErr;
-    }
-  }
+function saleFromRow(s, items){
+  return {id:s.id, date:s.date, customerId:s.customer_id, total:Number(s.total),
+    discount:Number(s.discount), paid:Number(s.paid), items};
+}
+
+function paymentFromRow(p){
+  return {id:p.id, customerId:p.customer_id, saleId:p.sale_id, amount:Number(p.amount),
+    date:p.date, note:p.note||""};
+}
+
+function updateProducts(rows){
+  const products = new Map(state.data.products.map(p=>[p.id,p]));
+  for(const row of rows) products.set(row.id, productFromRow(row));
+  state.data.products = [...products.values()].sort((a,b)=>a.name.localeCompare(b.name,"ar"));
 }
 
 async function loadRows(table, owner, sort){
@@ -453,28 +437,16 @@ async function loadData(){
 
     const itemsBySale = {};
     items.forEach(it=>{
-      (itemsBySale[it.sale_id] ||= []).push({
-        productId: it.product_id, name: it.name, qty: Number(it.qty),
-        sellPrice: Number(it.sell_price), buyPrice: Number(it.buy_price),
-      });
+      (itemsBySale[it.sale_id] ||= []).push(saleItemFromRow(it));
     });
 
     state.data = {
-      products: products.map(p=>({
-        id: p.id, name: p.name, code: p.code||"", buyPrice: Number(p.buy_price),
-        sellPrice: Number(p.sell_price), qty: Number(p.qty), imageUrl: p.image_url||"",
-      })),
+      products: products.map(productFromRow),
       customers: customers.map(c=>({
         id: c.id, name: c.name, phone: c.phone||"", location: c.location||"", note: c.note||"",
       })),
-      sales: sales.map(s=>({
-        id: s.id, date: s.date, customerId: s.customer_id, total: Number(s.total),
-        discount: Number(s.discount), paid: Number(s.paid), items: itemsBySale[s.id]||[],
-      })),
-      payments: payments.map(p=>({
-        id: p.id, customerId: p.customer_id, saleId: p.sale_id, amount: Number(p.amount),
-        date: p.date, note: p.note||"",
-      })),
+      sales: sales.map(s=>saleFromRow(s, itemsBySale[s.id]||[])),
+      payments: payments.map(paymentFromRow),
       expenses: expenses?.map(e=>({id:e.id, name:e.name, amount:Number(e.amount), date:e.date})) ?? null,
     };
   }catch(e){
@@ -486,26 +458,16 @@ async function loadData(){
   render();
 }
 
-async function persist(next){
-  const prev = state.data;
-  state.data = next;
-  render(); // optimistic: update UI immediately, sync in the background
-  const uid_ = session && session.user && session.user.id;
-  if(!uid_) return;
+async function persistCustomers(customers){
+  const previous = state.data.customers;
+  state.data.customers = customers;
+  render();
+  const owner = session?.user.id;
+  if(!owner) return;
   try{
-    const jobs = [];
-    if(next.products  !== prev.products)  jobs.push(syncProducts(prev.products, next.products, uid_));
-    if(next.customers !== prev.customers) jobs.push(syncCustomers(prev.customers, next.customers, uid_));
-    if(next.sales !== prev.sales){
-      jobs.push(syncSales(prev.sales, next.sales, uid_).then(()=>{
-        if(next.payments !== prev.payments) return syncPayments(prev.payments, next.payments, uid_);
-      }));
-    } else if(next.payments !== prev.payments){
-      jobs.push(syncPayments(prev.payments, next.payments, uid_));
-    }
-    await Promise.all(jobs);
-  }catch(e){
-    console.error("تعذر الحفظ في قاعدة البيانات", e);
+    await syncCustomers(previous, customers, owner);
+  }catch(error){
+    console.error("تعذر حفظ العميل", error);
     flashSaveError();
   }
 }
@@ -603,7 +565,7 @@ function render(){
 function renderNav(){
   const items = [
     {id:"home", label:"الرئيسية", ic:"🏠"},
-    {id:"products", label:"المنتجات", ic:"📦"},
+    {id:"products", label:"المخزون", ic:"📦"},
     {id:"sale", label:"بيع", ic:"🛒"},
     {id:"customers", label:"العملاء", ic:"👥"},
     {id:"reports", label:"التقارير", ic:"📊"},
@@ -621,7 +583,7 @@ function renderHome(){
   const todaySales = d.sales.filter(s=>isSameDay(s.date, todayISO()));
   const todayTotal = todaySales.reduce((a,s)=>a+s.total,0);
   const todayProfit = todaySales.reduce((a,s)=>a+s.items.reduce((x,it)=>x+(it.sellPrice-it.buyPrice)*it.qty,0)-(s.discount||0),0);
-  const totalStock = d.products.reduce((a,p)=>a+Number(p.qty||0),0);
+  const totalStock = d.products.reduce((a,p)=>a+p.qty+p.mainQty,0);
   const dbc = debtByCustomer();
   const totalDebt = Object.values(dbc).reduce((a,x)=>a+Math.max(x.remaining,0),0);
   const lowStock = d.products.filter(p=>Number(p.qty)<=LOW_STOCK);
@@ -634,13 +596,13 @@ function renderHome(){
       <button class="tile"><div class="icon" style="background:var(--emerald-soft)">📈</div>
         <div class="val">${fmt(todayProfit)} ${CURRENCY}</div><div class="lbl">الربح اليوم</div></button>
       <button class="tile" data-goto="products"><div class="icon" style="background:var(--chip)">📦</div>
-        <div class="val">${fmt(totalStock)}</div><div class="lbl">عدد القطع بالمخزن</div></button>
+        <div class="val">${fmt(totalStock)}</div><div class="lbl">القطع السليمة بالمخزون</div></button>
       <button class="tile" data-goto="customers"><div class="icon" style="background:var(--rose-soft)">⚠️</div>
         <div class="val">${fmt(totalDebt)} ${CURRENCY}</div><div class="lbl">الديون المستحقة</div></button>
     </div>
-    <div class="section-title">تنبيه المنتجات الناقصة</div>
+    <div class="section-title">تنبيه نقص البضاعة في المحل</div>
     ${lowStock.length===0
-      ? '<div class="empty">كل المنتجات متوفرة بكمية جيدة.</div>'
+      ? '<div class="empty">ماكو أصناف رصيدها منخفض بالمحل.</div>'
       : lowStock.map(p=>`<div class="lowstock-row"><b>${esc(p.name)}</b><span>${p.qty} متبقي</span></div>`).join("")}
   `;
   document.getElementById("logout-btn").onclick = signOut;
@@ -648,74 +610,258 @@ function renderHome(){
 
 /* ---------------- PRODUCTS ---------------- */
 function renderProducts(){
-  const q = ui.productQuery;
-  const list = state.data.products.filter(p=>p.name.includes(q) || (p.code||"").includes(q));
   document.getElementById("content").innerHTML = `
-    <div class="topbar"><h1>المنتجات</h1><button class="btn btn-primary" id="add-product">+ إضافة</button></div>
-    <div class="search"><span class="ic">🔍</span><input id="product-search" placeholder="بحث بالاسم أو الكود" value="${esc(q)}"></div>
-    <div id="product-list">
-    ${list.length===0 ? '<div class="empty">لا توجد منتجات بعد. اضغط "إضافة" لبدء المخزون.</div>' :
-      list.map(p=>`
-      <div class="card-row">
-        ${p.imageUrl ? `<img class="thumb" src="${esc(p.imageUrl)}">` : `<div class="thumb">📦</div>`}
-        <div class="grow">
-          <div class="name">${esc(p.name)}</div>
-          <div class="sub">${esc(p.code)||"بدون كود"}</div>
-          <div class="price">بيع: ${fmt(p.sellPrice)} ${CURRENCY} · شراء: ${fmt(p.buyPrice)} ${CURRENCY}</div>
-        </div>
-        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
-          <span class="qty-badge ${p.qty<=LOW_STOCK?'low':''}">${p.qty} قطعة</span>
-          <div class="row-actions">
-            <button class="icon-btn" data-edit-product="${p.id}">✏️</button>
-            ${ui.confirmDeleteId===p.id
-              ? `<button class="confirm-btn" data-del-product="${p.id}">تأكيد</button>`
-              : `<button class="icon-btn danger" data-ask-del-product="${p.id}">🗑</button>`}
-          </div>
-        </div>
-      </div>`).join("")}
-    </div>
+    <div class="topbar"><h1>إدارة المخزون</h1><button class="btn btn-primary" id="add-product">+ إضافة منتج</button></div>
+    <div class="search"><span class="ic">🔍</span><input id="product-search" aria-label="بحث بالمخزون" placeholder="بحث بالاسم أو الكود" value="${esc(ui.productQuery)}"></div>
+    <div id="product-list"></div>
   `;
-  document.getElementById("add-product").onclick = ()=>openProductForm(null);
-  document.getElementById("product-search").oninput = (e)=>{ ui.productQuery = e.target.value; renderProducts(); };
-  document.querySelectorAll("[data-edit-product]").forEach(b=>b.onclick=()=>openProductForm(b.dataset.editProduct));
-  document.querySelectorAll("[data-ask-del-product]").forEach(b=>b.onclick=()=>{ ui.confirmDeleteId=b.dataset.askDelProduct; renderProducts(); });
-  document.querySelectorAll("[data-del-product]").forEach(b=>b.onclick=()=>{
-    const id=b.dataset.delProduct;
-    persist({...state.data, products: state.data.products.filter(p=>p.id!==id)});
-    ui.confirmDeleteId=null;
-  });
+  document.getElementById("add-product").onclick = ()=>openProductForm();
+  document.getElementById("product-search").oninput = (event)=>{
+    ui.productQuery = event.target.value;
+    renderProductList();
+  };
+  const list = document.getElementById("product-list");
+  list.onclick = (event)=>{
+    const row = event.target.closest("[data-stock-product]");
+    if(row) openStockProduct(row.dataset.stockProduct);
+  };
+  renderProductList();
 }
 
-function openProductForm(id){
-  const p = id ? state.data.products.find(x=>x.id===id) : {id:null,name:"",code:"",buyPrice:"",sellPrice:"",qty:"",imageUrl:""};
-  openSheet(id?"تعديل منتج":"منتج جديد", `
-    <label class="field"><div class="field-label">الاسم</div><input class="in" id="f-name" value="${esc(p.name)}"></label>
-    <label class="field"><div class="field-label">الكود (اختياري)</div><input class="in" id="f-code" value="${esc(p.code)}"></label>
-    <div class="two-col">
-      <label class="field"><div class="field-label">سعر الشراء</div><input class="in" id="f-buy" type="number" inputmode="decimal" value="${esc(p.buyPrice)}"></label>
-      <label class="field"><div class="field-label">سعر البيع</div><input class="in" id="f-sell" type="number" inputmode="decimal" value="${esc(p.sellPrice)}"></label>
+function stockCounts(p, showCondition=false){
+  return `<div class="grid2 ${showCondition?"stock-details":""}">
+    <div class="stock-count">
+      <span>المخزن الرئيسي</span><b>${p.mainQty.toLocaleString("en-US")} قطعة${showCondition?" سليمة":""}</b>
+      ${showCondition && p.mainDamagedQty ? `<span>تالف ${fmt(p.mainDamagedQty)}</span>` : ""}
+      ${showCondition && p.mainWornQty ? `<span>تعبان ${fmt(p.mainWornQty)}</span>` : ""}
     </div>
-    <label class="field"><div class="field-label">الكمية</div><input class="in" id="f-qty" type="number" inputmode="numeric" value="${esc(p.qty)}"></label>
-    <label class="field"><div class="field-label">رابط صورة (اختياري)</div><input class="in" id="f-img" placeholder="https://..." value="${esc(p.imageUrl)}"></label>
-    <button class="btn btn-primary btn-block" id="save-product">حفظ</button>
+    <div class="stock-count shop ${p.qty<=LOW_STOCK?"low":""}">
+      <span>المحل (الثانوي)</span><b>${p.qty.toLocaleString("en-US")} قطعة${showCondition?" سليمة":""}</b>
+      ${showCondition && p.shopDamagedQty ? `<span>تالف ${fmt(p.shopDamagedQty)}</span>` : ""}
+      ${showCondition && p.shopWornQty ? `<span>تعبان ${fmt(p.shopWornQty)}</span>` : ""}
+    </div>
+  </div>`;
+}
+
+function renderProductList(){
+  const query = ui.productQuery.trim().toLowerCase();
+  const products = state.data.products.filter(p=>p.name.toLowerCase().includes(query) || p.code.toLowerCase().includes(query));
+  document.getElementById("product-list").innerHTML = products.length ? products.map(p=>`
+    <button type="button" class="card-row stock-row" data-stock-product="${esc(p.id)}">
+      <div class="stock-head">
+        ${p.imageUrl ? `<img class="thumb" src="${esc(p.imageUrl)}" alt="">` : `<span class="thumb" aria-hidden="true">📦</span>`}
+        <div class="grow">
+          <div class="name">${esc(p.name)}</div>
+          ${p.code ? `<div class="sub">${esc(p.code)}</div>` : ""}
+          <div class="price">سعر البيع ${fmt(p.sellPrice)} ${CURRENCY}</div>
+        </div>
+      </div>
+      ${stockCounts(p)}
+    </button>`).join("") : `<div class="empty">${query ? "ماكو صنف مطابق للبحث." : "أضف أول منتج حتى يظهر بالمخزون."}</div>`;
+}
+
+function openStockProduct(id, confirmDelete=false){
+  const product = state.data.products.find(p=>p.id===id);
+  if(!product) return;
+  openSheet(product.name, `
+    ${stockCounts(product, true)}
+    <div class="summary-card">
+      <div class="kv"><span class="k">سعر الشراء</span><span class="v">${fmt(product.buyPrice)} ${CURRENCY}</span></div>
+      <div class="kv"><span class="k">سعر البيع</span><span class="v">${fmt(product.sellPrice)} ${CURRENCY}</span></div>
+    </div>
+    <div class="grid2 stock-actions">
+      <button class="btn btn-secondary" id="receive-stock">إضافة كمية</button>
+      <button class="btn btn-primary" id="transfer-stock" ${product.mainQty<1?"disabled":""}>نقل للمحل</button>
+      <button class="btn btn-secondary" id="flag-stock" ${product.mainQty<1&&product.qty<1?"disabled":""}>تالف / تعبان</button>
+      <button class="btn btn-ghost" id="edit-stock-product">تعديل المنتج</button>
+    </div>
+    <div class="stock-remove">
+      <button class="${confirmDelete?"btn btn-danger":"link-btn"}" id="delete-stock-product">${confirmDelete?"تأكيد حذف المنتج":"حذف المنتج"}</button>
+    </div>
   `);
-  document.getElementById("save-product").onclick = ()=>{
-    const name = document.getElementById("f-name").value.trim();
-    const sell = document.getElementById("f-sell").value;
-    const qty = document.getElementById("f-qty").value;
-    if(!name || sell==="" || qty==="") return;
-    const clean = {
-      id: p.id || uid(),
-      name, code: document.getElementById("f-code").value.trim(),
-      buyPrice: Number(document.getElementById("f-buy").value)||0,
-      sellPrice: Number(sell)||0,
-      qty: Number(qty)||0,
-      imageUrl: document.getElementById("f-img").value.trim(),
+  document.getElementById("receive-stock").onclick = ()=>openStockMovement(product,"receive");
+  document.getElementById("transfer-stock").onclick = ()=>openStockMovement(product,"transfer");
+  document.getElementById("flag-stock").onclick = ()=>openStockMovement(product,"flag");
+  document.getElementById("edit-stock-product").onclick = ()=>openProductForm(product);
+  document.getElementById("delete-stock-product").onclick = async (event)=>{
+    if(!confirmDelete){ openStockProduct(id,true); return; }
+    const owner = session?.user.id;
+    if(!owner) return;
+    const button = event.currentTarget;
+    button.disabled = true;
+    try{
+      const {error} = await sb.from("products").delete().eq("id",id).eq("user_id",owner);
+      if(error) throw error;
+      if(session?.user.id !== owner) return;
+      state.data.products = state.data.products.filter(p=>p.id!==id);
+      if(button.isConnected) closeModal();
+      render();
+    }catch(error){
+      console.error("تعذّر حذف المنتج",error);
+      flashSaveError();
+      button.disabled = false;
+    }
+  };
+}
+
+function openProductForm(product){
+  const p = product || {id:uid(), name:"", code:"", buyPrice:"", sellPrice:"", mainQty:"", imageUrl:""};
+  openSheet(product?"تعديل منتج":"منتج جديد", `
+    <form id="product-form">
+      <label class="field"><div class="field-label">الاسم</div><input class="in" id="f-name" value="${esc(p.name)}" required></label>
+      <label class="field"><div class="field-label">الكود (اختياري)</div><input class="in" id="f-code" value="${esc(p.code)}"></label>
+      <div class="two-col">
+        <label class="field"><div class="field-label">سعر الشراء</div><input class="in" id="f-buy" type="number" inputmode="decimal" step="any" value="${esc(p.buyPrice)}"></label>
+        <label class="field"><div class="field-label">سعر البيع</div><input class="in" id="f-sell" type="number" inputmode="decimal" step="any" value="${esc(p.sellPrice)}" required></label>
+      </div>
+      <label class="field"><div class="field-label">الكمية في المخزن الرئيسي</div><input class="in" id="f-qty" type="number" inputmode="numeric" min="0" step="1" max="9007199254740991" value="${esc(p.mainQty)}" required></label>
+      ${product ? `<label class="field"><div class="field-label">الكمية السليمة في المحل</div>
+        <input class="in" id="f-shop-qty" type="number" inputmode="numeric" min="0" step="any" max="9007199254740991" value="${esc(p.qty)}" required></label>` : ""}
+      <label class="field"><div class="field-label">رابط صورة (اختياري)</div><input class="in" id="f-img" placeholder="https://..." value="${esc(p.imageUrl)}"></label>
+      <div class="notice" id="product-form-error" role="alert" hidden></div>
+      <button class="btn btn-primary btn-block" id="save-product">حفظ</button>
+    </form>
+  `);
+  const form = document.getElementById("product-form");
+  const nameInput = document.getElementById("f-name");
+  const button = document.getElementById("save-product");
+  const notice = document.getElementById("product-form-error");
+  nameInput.oninput = ()=>nameInput.setCustomValidity("");
+  form.onsubmit = async (event)=>{
+    event.preventDefault();
+    if(button.disabled) return;
+    const owner = session?.user.id;
+    const name = nameInput.value.trim();
+    if(!name){
+      nameInput.setCustomValidity("أدخل اسم المنتج");
+      nameInput.reportValidity();
+      return;
+    }
+    const mainQty = Number(document.getElementById("f-qty").value);
+    if(!owner || !Number.isSafeInteger(mainQty) || mainQty<0) return;
+    const fields = {
+      name, code:document.getElementById("f-code").value.trim(),
+      buy_price:Number(document.getElementById("f-buy").value)||0,
+      sell_price:Number(document.getElementById("f-sell").value),
+      image_url:document.getElementById("f-img").value.trim(),
     };
-    const exists = state.data.products.some(x=>x.id===clean.id);
-    const products = exists ? state.data.products.map(x=>x.id===clean.id?clean:x) : [...state.data.products, clean];
-    closeModal();
-    persist({...state.data, products});
+    button.disabled = true;
+    notice.hidden = true;
+    try{
+      let result;
+      if(product){
+        const shopQty = Number(document.getElementById("f-shop-qty").value);
+        if(!Number.isFinite(shopQty) || shopQty<0) return;
+        const mainChanged = mainQty!==p.mainQty;
+        const shopChanged = shopQty!==p.qty;
+        if(mainChanged) fields.main_qty = mainQty;
+        if(shopChanged) fields.qty = shopQty;
+        let query = sb.from("products").update(fields).eq("id",p.id).eq("user_id",owner);
+        if(mainChanged) query = query.eq("main_qty",p.mainQty);
+        if(shopChanged) query = query.eq("qty",p.qty);
+        result = await query.select("*").maybeSingle();
+      }else{
+        result = await sb.from("products").upsert({
+          id:p.id, user_id:owner, ...fields, main_qty:mainQty, qty:0
+        },{onConflict:"id",ignoreDuplicates:true}).select("*").maybeSingle();
+      }
+      if(result.error) throw result.error;
+      if(!result.data){
+        const current = await sb.from("products").select("*").eq("user_id",owner).eq("id",p.id).single();
+        if(current.error) throw current.error;
+        if(session?.user.id !== owner) return;
+        updateProducts([current.data]);
+        render();
+        if(!form.isConnected) return;
+        if(product){
+          notice.textContent = "تغيّر رصيد المخزن. افتح الصنف مرة ثانية حتى تظهر الكمية الجديدة.";
+          notice.hidden = false;
+          return;
+        }
+      }else{
+        if(session?.user.id !== owner) return;
+        updateProducts([result.data]);
+        render();
+      }
+      if(form.isConnected && document.getElementById("modal-root").classList.contains("open")) openStockProduct(p.id);
+    }catch(error){
+      console.error("تعذّر حفظ المنتج",error);
+      notice.textContent = "تعذّر حفظ المنتج. جرّب مرة ثانية.";
+      notice.hidden = false;
+    }finally{
+      button.disabled = false;
+    }
+  };
+}
+
+function openStockMovement(product, movement){
+  const titles = {receive:"إضافة كمية للرئيسي",transfer:"نقل من الرئيسي للمحل",flag:"تسجيل تالف أو تعبان"};
+  const flag = movement==="flag";
+  const source = product.mainQty>=1 ? "main" : "shop";
+  openSheet(titles[movement], `
+    <button class="back-x" id="return-stock-product" style="margin-bottom:12px">‹ ${esc(product.name)}</button>
+    <form id="stock-movement-form">
+      ${flag ? `
+      <div class="two-col">
+        <label class="field"><div class="field-label">المخزن</div>
+          <select class="in" id="stock-source">
+            <option value="main" ${source==="main"?"selected":""}>الرئيسي</option>
+            <option value="shop" ${source==="shop"?"selected":""}>المحل</option>
+          </select>
+        </label>
+        <label class="field"><div class="field-label">الحالة</div>
+          <select class="in" id="stock-condition"><option value="damaged">تالف</option><option value="worn">تعبان</option></select>
+        </label>
+      </div>` : ""}
+      <label class="field"><div class="field-label" id="stock-quantity-label">عدد القطع</div>
+        <input class="in" id="stock-quantity" type="number" inputmode="numeric" min="1" step="1" required>
+      </label>
+      <div class="notice" id="stock-movement-error" role="alert" hidden></div>
+      <button class="btn btn-primary btn-block" id="save-stock-movement">${movement==="transfer"?"نقل الكمية":"حفظ الكمية"}</button>
+    </form>
+  `);
+  const form = document.getElementById("stock-movement-form");
+  const input = document.getElementById("stock-quantity");
+  const warehouseInput = document.getElementById("stock-source");
+  const submit = document.getElementById("save-stock-movement");
+  const notice = document.getElementById("stock-movement-error");
+  const quantityLabel = document.getElementById("stock-quantity-label");
+  const warehouse = ()=>warehouseInput?.value || "main";
+  function updateLimit(){
+    const available = warehouse()==="main" ? product.mainQty : product.qty;
+    input.max = movement==="receive" ? "9007199254740991" : String(Math.floor(available));
+    if(movement!=="receive") quantityLabel.textContent = `عدد القطع · السليم المتاح ${available.toLocaleString("en-US")}`;
+  }
+  updateLimit();
+  if(warehouseInput) warehouseInput.onchange = updateLimit;
+  document.getElementById("return-stock-product").onclick = ()=>openStockProduct(product.id);
+  let request = null;
+  form.onsubmit = async (event)=>{
+    event.preventDefault();
+    const owner = session?.user.id;
+    const units = Number(input.value);
+    if(!owner || submit.disabled || !Number.isSafeInteger(units) || units<1 || units>Number(input.max)) return;
+    const action = flag ? document.getElementById("stock-condition").value : movement;
+    const location = warehouse();
+    if(!request || request.p_units!==units || request.p_action!==action || request.p_warehouse!==location){
+      request = {p_id:uid(), p_product_id:product.id, p_action:action, p_warehouse:location, p_units:units};
+    }
+    submit.disabled = true;
+    notice.hidden = true;
+    try{
+      const {data,error} = await sb.rpc("move_product_stock",request);
+      if(error) throw error;
+      if(session?.user.id !== owner) return;
+      updateProducts(Array.isArray(data) ? data : [data]);
+      render();
+      if(form.isConnected && document.getElementById("modal-root").classList.contains("open")) openStockProduct(product.id);
+    }catch(error){
+      console.error("تعذّر تحديث المخزون",error);
+      notice.textContent = error.code==="P0001" ? error.message : "تعذّر تحديث المخزون. جرّب مرة ثانية.";
+      notice.hidden = false;
+    }finally{
+      submit.disabled = false;
+    }
   };
 }
 
@@ -743,7 +889,7 @@ function renderSale(){
   const paidNum = Number(ui.salePaid)||0;
   const remaining = total - paidNum;
   const stockOk = ui.cart.every(it=>it.qty<=availableQty(it.productId));
-  const canSell = ui.cart.length>0 && stockOk && (remaining<=0 || ui.saleCustomerId!=="");
+  const canSell = !ui.saleSaving && ui.cart.length>0 && stockOk && (remaining<=0 || ui.saleCustomerId!=="");
   const selectedCustomer = ui.saleCustomerId ? state.data.customers.find(c=>c.id===ui.saleCustomerId) : null;
 
   document.getElementById("content").innerHTML = `
@@ -751,6 +897,7 @@ function renderSale(){
       ${ui.editingSaleId ? `<button class="link-btn" id="cancel-edit">إلغاء التعديل</button>` : ""}
     </div>
     ${ui.saleDone ? `<div class="notice success">✔ تم حفظ الفاتورة بنجاح</div>` : ""}
+    ${ui.saleError ? `<div class="notice" role="alert">${esc(ui.saleError)}</div>` : ""}
     <button class="btn btn-primary btn-block" id="open-picker" style="margin-bottom:14px">+ اختر منتج</button>
     ${ui.cart.length===0 ? '<div class="empty" style="margin-top:8px">أضف منتجًا لبدء عملية البيع.</div>' :
       `<div id="cart-list">${ui.cart.map(it=>{
@@ -759,7 +906,7 @@ function renderSale(){
         return `<div class="card-row">
           <div class="grow"><div class="name">${esc(p.name)}</div>
             <div class="sub">${fmt(p.sellPrice)} ${CURRENCY} × ${it.qty} = ${fmt(p.sellPrice*it.qty)} ${CURRENCY}
-              ${it.qty>max ? `<span style="color:var(--rose);font-weight:700"> · فقط ${max} متوفر</span>` : ""}</div></div>
+              ${it.qty>max ? `<span style="color:var(--rose);font-weight:700"> · فقط ${max} متوفر بالمحل</span>` : ""}</div></div>
           <div class="cart-qty">
             <button data-qty-minus="${p.id}">−</button>
             <input type="number" inputmode="numeric" min="1" value="${it.qty}" data-qty-input="${p.id}">
@@ -780,7 +927,7 @@ function renderSale(){
         <label class="field"><div class="field-label">خصم (اختياري)</div>
           <input class="in" id="sale-discount" type="number" inputmode="decimal" value="${ui.saleDiscount}"></label>
         <label class="field"><div class="field-label">المبلغ المدفوع الآن</div>
-          <input class="in" id="sale-paid" type="number" inputmode="decimal" placeholder="0" value="${esc(ui.salePaid)}"></label>
+          <input class="in" id="sale-paid" type="number" inputmode="decimal" min="0" placeholder="0" value="${esc(ui.salePaid)}"></label>
       </div>
       <div class="summary-card">
         <div class="kv"><span class="k">الإجمالي قبل الخصم</span><span class="v">${fmt(rawTotal)} ${CURRENCY}</span></div>
@@ -790,7 +937,7 @@ function renderSale(){
         <div class="kv"><span class="k">المتبقي (دين)</span><span class="v ${remaining>0?'rose':'emerald'}">${fmt(Math.max(remaining,0))} ${CURRENCY}</span></div>
       </div>
       ${remaining>0 && !ui.saleCustomerId ? '<div class="notice">يوجد مبلغ متبقي — اختر عميلاً لتسجيله كدين، أو أكمل الدفع بالكامل.</div>' : ""}
-      ${!stockOk ? '<div class="notice" style="background:var(--rose-soft);color:var(--rose);border-color:#F2C9C4">إحدى الكميات المطلوبة أكبر من المتوفر بالمخزون.</div>' : ""}
+      ${!stockOk ? '<div class="notice" style="background:var(--rose-soft);color:var(--rose);border-color:#F2C9C4">إحدى الكميات المطلوبة أكبر من رصيد المحل.</div>' : ""}
       <button class="btn btn-block ${canSell?'btn-primary':'btn-disabled'}" id="confirm-sale" ${canSell?'':'disabled'} style="margin-bottom:20px">${ui.editingSaleId ? "حفظ التعديلات" : "حفظ الفاتورة"}</button>
     ` : ""}
   `;
@@ -812,8 +959,14 @@ function renderSale(){
     });
     document.getElementById("open-customer-picker").onclick = openCustomerPickerForSale;
     document.getElementById("sale-date").onchange = (e)=>{ ui.saleDate = e.target.value; };
-    document.getElementById("sale-discount").oninput = (e)=>{ ui.saleDiscount = e.target.value; renderSale(); };
-    document.getElementById("sale-paid").oninput = (e)=>{ ui.salePaid = e.target.value; renderSale(); };
+    const inputFields = [["sale-discount","saleDiscount"],["sale-paid","salePaid"]];
+    for(const [id,key] of inputFields){
+      document.getElementById(id).oninput = (event)=>{
+        ui[key] = event.target.value;
+        renderSale();
+        document.getElementById(id).focus();
+      };
+    }
     const confirmBtn = document.getElementById("confirm-sale");
     if(confirmBtn) confirmBtn.onclick = confirmSale;
   }
@@ -828,6 +981,7 @@ function changeCartQty(id, delta){
 function resetSaleForm(){
   ui.cart = []; ui.saleCustomerId=""; ui.salePaid=""; ui.saleDiscount="0";
   ui.saleDate = nowLocalInput(); ui.editingSaleId = null;
+  ui.saleDraftId = null; ui.saleError = "";
 }
 
 function openProductPicker(){ renderPickerSheet(""); }
@@ -836,9 +990,10 @@ function renderPickerSheet(query){
   openSheet("اختر منتجًا", `
     <div class="search"><span class="ic">🔍</span><input class="in" id="picker-search" placeholder="بحث..." value="${esc(query)}" style="padding-right:38px"></div>
     <div id="picker-list">
-    ${available.length===0 ? '<div class="empty">لا توجد منتجات متاحة بالمخزون.</div>' :
+    ${available.length===0 ? (query ? '<div class="empty">ماكو صنف مطابق ومتاح بالمحل.</div>' :
+      '<div class="empty">ماكو أصناف للبيع بالمحل. انقل كمية من المخزن الرئيسي.</div>') :
       available.map(p=>`<button class="picker-item" data-pick="${p.id}">
-        <span class="n">${esc(p.name)}</span><span class="m">${fmt(p.sellPrice)} ${CURRENCY} · متوفر ${availableQty(p.id)}</span>
+        <span class="n">${esc(p.name)}</span><span class="m">${fmt(p.sellPrice)} ${CURRENCY} · بالمحل ${availableQty(p.id)}</span>
       </button>`).join("")}
     </div>
   `);
@@ -875,45 +1030,51 @@ function renderSaleCustomerPicker(query){
   });
 }
 
-function confirmSale(){
-  const pm = saleProductMap();
-  const rawTotal = ui.cart.reduce((a,it)=>a+(pm[it.productId]?.sellPrice||0)*it.qty,0);
-  const discount = Math.max(Number(ui.saleDiscount)||0,0);
-  const total = Math.max(rawTotal - discount, 0);
-  const paidNum = Math.min(Number(ui.salePaid)||0, total);
-  const isoDate = localInputToISO(ui.saleDate);
-  const items = ui.cart.map(it=>{
-    const p = pm[it.productId];
-    return {productId:p.id, name:p.name, qty:it.qty, sellPrice:p.sellPrice, buyPrice:p.buyPrice};
-  });
-
-  if(ui.editingSaleId){
-    const oldSale = state.data.sales.find(s=>s.id===ui.editingSaleId);
-    const products = state.data.products.map(p=>{
-      const oldQty = (oldSale.items.find(it=>it.productId===p.id)||{}).qty || 0;
-      const newQty = (ui.cart.find(it=>it.productId===p.id)||{}).qty || 0;
-      const diff = oldQty - newQty;
-      return diff !== 0 ? {...p, qty: p.qty + diff} : p;
+async function confirmSale(){
+  const owner = session?.user.id;
+  if(!owner || ui.saleSaving) return;
+  const editing = Boolean(ui.editingSaleId);
+  const saleId = ui.editingSaleId || (ui.saleDraftId ||= uid());
+  const items = ui.cart.map(item=>({product_id:item.productId, units:item.qty}));
+  const content = document.getElementById("content");
+  const button = document.getElementById("confirm-sale");
+  ui.saleSaving = true;
+  ui.saleError = "";
+  button.disabled = true;
+  button.textContent = "جارِ حفظ الفاتورة…";
+  content.inert = true;
+  try{
+    const {data,error} = await sb.rpc("save_inventory_sale",{
+      p_id:saleId, p_editing:editing, p_customer_id:ui.saleCustomerId||null,
+      p_date:localInputToISO(ui.saleDate), p_discount:Math.max(Number(ui.saleDiscount)||0,0),
+      p_paid:Math.max(Number(ui.salePaid)||0,0), p_items:items,
     });
-    const payments = state.data.payments.filter(pay=>pay.saleId !== ui.editingSaleId);
-    if(paidNum>0) payments.push({id:uid(), customerId: ui.saleCustomerId||null, amount:paidNum, date:isoDate, note:"دفعة عند البيع", saleId:ui.editingSaleId});
-    const updatedSale = {...oldSale, date:isoDate, customerId: ui.saleCustomerId||null, items, total, discount, paid:paidNum};
-    const sales = state.data.sales.map(s=>s.id===ui.editingSaleId?updatedSale:s);
+    if(error) throw error;
+    if(session?.user.id !== owner) return;
+    const invoice = saleFromRow(data.sale, data.items.map(saleItemFromRow));
+    updateProducts(data.products);
+    state.data.sales = [...state.data.sales.filter(s=>s.id!==saleId),invoice];
+    state.data.payments = [...state.data.payments.filter(p=>p.saleId!==saleId),...data.payments.map(paymentFromRow)];
     resetSaleForm();
-    persist({...state.data, products, sales, payments});
-    state.tab = "reports";
-  } else {
-    const sale = { id:uid(), date:isoDate, customerId: ui.saleCustomerId||null, items, total, discount, paid: paidNum };
-    const products = state.data.products.map(p=>{
-      const inCart = ui.cart.find(it=>it.productId===p.id);
-      return inCart ? {...p, qty:p.qty-inCart.qty} : p;
-    });
-    const payments = [...state.data.payments];
-    if(paidNum>0) payments.push({id:uid(), customerId: ui.saleCustomerId||null, amount:paidNum, date:isoDate, note:"دفعة عند البيع", saleId:sale.id});
-    resetSaleForm();
-    ui.saleDone = true;
-    persist({...state.data, products, sales:[...state.data.sales, sale], payments});
-    setTimeout(()=>{ ui.saleDone=false; if(state.tab==="sale") render(); }, 1600);
+    if(editing && state.tab==="sale") state.tab = "reports";
+    if(!editing && state.tab==="sale"){
+      ui.saleDone = true;
+      setTimeout(()=>{ ui.saleDone=false; if(session && state.tab==="sale") render(); },1600);
+    }
+  }catch(error){
+    console.error("تعذّر حفظ الفاتورة",error);
+    if(session?.user.id === owner){
+      ui.saleError = error.code==="P0001" ? error.message : "تعذّر حفظ الفاتورة. جرّب مرة ثانية.";
+      if(error.code==="P0001" && items.length){
+        const result = await sb.from("products").select("*").eq("user_id",owner)
+          .in("id",items.map(item=>item.product_id).filter(Boolean));
+        if(!result.error && session?.user.id === owner) updateProducts(result.data);
+      }
+    }
+  }finally{
+    ui.saleSaving = false;
+    content.inert = false;
+    if(session?.user.id === owner) render();
   }
 }
 
@@ -980,7 +1141,7 @@ function openCustomerForm(){
     const clean = { id:uid(), name, phone:document.getElementById("c-phone").value.trim(),
       location:document.getElementById("c-location").value.trim(), note:document.getElementById("c-note").value.trim() };
     closeModal();
-    persist({...state.data, customers:[...state.data.customers, clean]});
+    persistCustomers([...state.data.customers, clean]);
   };
 }
 
@@ -1178,6 +1339,7 @@ function renderInvoiceListSheet(query, keepFocus=false){
 function openInvoiceDetail(saleId, fromCustomer){
   const s = state.data.sales.find(x=>x.id===saleId);
   if(!s) return;
+  const canEdit = s.items.every(it=>state.data.products.some(p=>p.id===it.productId));
   const customer = state.data.customers.find(c=>c.id===s.customerId);
   const {bySale, byCustomer} = paymentSummary();
   const invoice = bySale.get(saleId);
@@ -1199,8 +1361,9 @@ function openInvoiceDetail(saleId, fromCustomer){
     </div>
     <div class="section-title">دفعات الفاتورة</div>
     ${paymentRows(invoice.payments)}
+    ${canEdit ? "" : '<div class="notice">بعض أصناف الفاتورة محذوفة من المخزون.</div>'}
     <div style="display:flex;gap:8px;margin-top:14px;">
-      <button class="btn btn-secondary" style="flex:1" id="edit-invoice">تعديل الفاتورة</button>
+      <button class="btn btn-secondary" style="flex:1" id="edit-invoice" ${canEdit?"":"disabled"}>تعديل الفاتورة</button>
       ${ui.confirmDeleteInvoiceId===saleId
         ? `<button class="btn btn-danger" style="flex:1" id="confirm-del-invoice">اضغط للتأكيد</button>`
         : `<button class="btn btn-ghost" style="flex:1" id="ask-del-invoice">حذف الفاتورة</button>`}
@@ -1215,16 +1378,27 @@ function openInvoiceDetail(saleId, fromCustomer){
   const askBtn = document.getElementById("ask-del-invoice");
   if(askBtn) askBtn.onclick = ()=>{ ui.confirmDeleteInvoiceId=saleId; openInvoiceDetail(saleId, fromCustomer); };
   const confirmBtn = document.getElementById("confirm-del-invoice");
-  if(confirmBtn) confirmBtn.onclick = ()=>{
-    const products = state.data.products.map(p=>{
-      const item = s.items.find(it=>it.productId===p.id);
-      return item ? {...p, qty:p.qty+item.qty} : p;
-    });
-    const sales = state.data.sales.filter(x=>x.id!==saleId);
-    const payments = state.data.payments.filter(p=>p.saleId!==saleId);
-    ui.confirmDeleteInvoiceId = null;
-    closeModal();
-    persist({...state.data, products, sales, payments});
+  if(confirmBtn) confirmBtn.onclick = async ()=>{
+    const owner = session?.user.id;
+    if(!owner || confirmBtn.disabled) return;
+    confirmBtn.disabled = true;
+    try{
+      const {data,error} = await sb.rpc("delete_inventory_sale",{
+        p_id:saleId, p_product_ids:s.items.map(item=>item.productId).filter(Boolean),
+      });
+      if(error) throw error;
+      if(session?.user.id !== owner) return;
+      updateProducts(data);
+      state.data.sales = state.data.sales.filter(x=>x.id!==saleId);
+      state.data.payments = state.data.payments.filter(p=>p.saleId!==saleId);
+      ui.confirmDeleteInvoiceId = null;
+      if(confirmBtn.isConnected) closeModal();
+      render();
+    }catch(error){
+      console.error("تعذّر حذف الفاتورة",error);
+      flashSaveError();
+      confirmBtn.disabled = false;
+    }
   };
 }
 
@@ -1232,6 +1406,7 @@ function editInvoice(saleId){
   const s = state.data.sales.find(x=>x.id===saleId);
   if(!s) return;
   ui.editingSaleId = saleId;
+  ui.saleError = "";
   ui.cart = s.items.map(it=>({productId:it.productId, qty:it.qty}));
   ui.saleCustomerId = s.customerId || "";
   ui.salePaid = String(s.paid);
