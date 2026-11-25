@@ -133,7 +133,13 @@
   .customer-row .phone{font-size:10.5px;color:#B9BCB4;margin-top:2px;}
   .customer-row .right{text-align:left;}
   .customer-row .right .amt{font-weight:800;font-size:13.5px;}
-  .customer-row .right .last{font-size:10px;color:#B9BCB4;margin-top:2px;}
+  .customer-row .right .last{font-size:11px;color:var(--muted);margin-top:2px;}
+  .customer-row .right .last.rose{color:var(--rose);}
+  .customer-row .right .last.emerald{color:var(--emerald);}
+  .customer-row .left,.customer-row .right{min-width:0;overflow-wrap:anywhere;}
+  .invoice-row{font-family:inherit;width:100%;text-align:right;color:inherit;gap:10px;}
+  .invoice-row .sub{color:var(--muted);}
+  .history-row.static{cursor:default;gap:10px;overflow-wrap:anywhere;}
   .chip-select{display:flex;align-items:center;justify-content:space-between;
     background:#fff;border:1px solid var(--border);border-radius:var(--radius-sm);
     padding:11px 12px;cursor:pointer;font-size:14px;}
@@ -187,7 +193,8 @@ const LOW_STOCK = 5;
 const CURRENCY = "د.ع";
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
 const fmt = (n) => Math.round(n||0).toLocaleString("en-US");
-const todayISO = () => new Date().toISOString().slice(0,10);
+const localDay = (date) => nowLocalInput(date).slice(0, 10);
+const todayISO = () => localDay();
 const esc = (s) => (s==null?"":String(s)).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const nowLocalInput = (iso) => {
   const d = iso ? new Date(iso) : new Date();
@@ -215,7 +222,7 @@ async function initAuth(){
     session = s;
     if(session && !wasSignedIn){ loadData(); }
     else if(!session){
-      state = { data:{ products:[], customers:[], sales:[], payments:[] }, tab:"home", ready:false };
+      state = { data:{ products:[], customers:[], sales:[], payments:[], expenses:null }, tab:"home", ready:false };
       renderAuth();
     }
   });
@@ -279,14 +286,15 @@ async function signOut(){
   await sb.auth.signOut();
 }
 
-function isSameDay(dateStr, ref){ return dateStr.slice(0,10) === ref.slice(0,10); }
+function isSameDay(dateStr, ref){ return localDay(dateStr) === ref; }
 function isWithinDays(dateStr, days){
-  const d = new Date(dateStr).getTime(), now = Date.now();
-  return now - d <= days*24*60*60*1000 && d <= now;
+  const first = new Date();
+  first.setDate(first.getDate() - days + 1);
+  const day = localDay(dateStr);
+  return day >= localDay(first) && day <= todayISO();
 }
 function isSameMonth(dateStr, ref){
-  const a = new Date(dateStr), b = new Date(ref);
-  return a.getFullYear()===b.getFullYear() && a.getMonth()===b.getMonth();
+  return localDay(dateStr).slice(0, 7) === ref.slice(0, 7);
 }
 function fmtDate(dateStr){ return new Date(dateStr).toLocaleDateString("en-GB"); }
 function fmtDateTime(dateStr){
@@ -294,14 +302,13 @@ function fmtDateTime(dateStr){
   return d.toLocaleDateString("en-GB") + " " + d.toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"});
 }
 
-let state = { data: { products: [], customers: [], sales: [], payments: [] }, tab: "home", ready: false };
+let state = { data: { products: [], customers: [], sales: [], payments: [], expenses: null }, tab: "home", ready: false };
 let ui = {
   productQuery: "", confirmDeleteId: null,
   cart: [], saleCustomerId: "", salePaid: "", saleDiscount: "0", saleDate: nowLocalInput(),
   saleDone: false, editingSaleId: null,
   reportPeriod: "day",
-  payAmount: "",
-  customerQuery: "", customerSort: "debt",
+  customerQuery: "", customerFilter: "all",
   invoiceQuery: "", confirmDeleteInvoiceId: null,
 };
 let charts = { trend: null, top: null };
@@ -413,20 +420,37 @@ async function syncSales(prevArr, nextArr, uid_){
   }
 }
 
+async function loadRows(table, owner, sort){
+  const rows = [];
+  const pageSize = 500;
+  for(let start = 0; ; start += pageSize){
+    let query = sb.from(table).select("*").eq("user_id", owner);
+    if(sort) query = query.order(sort);
+    const { data, error } = await query.order("id").range(start, start + pageSize - 1);
+    if(error) throw error;
+    rows.push(...data);
+    if(data.length < pageSize) return rows;
+  }
+}
+
 async function loadData(){
   try{
     const uid_ = session.user.id;
-    const [productsRes, customersRes, salesRes, paymentsRes, itemsRes] = await Promise.all([
-      sb.from("products").select("*").eq("user_id", uid_).order("name"),
-      sb.from("customers").select("*").eq("user_id", uid_).order("name"),
-      sb.from("sales").select("*").eq("user_id", uid_).order("date"),
-      sb.from("payments").select("*").eq("user_id", uid_).order("date"),
-      sb.from("sale_items").select("*").eq("user_id", uid_),
+    const [products, customers, sales, payments, items, expenses] = await Promise.all([
+      loadRows("products", uid_, "name"),
+      loadRows("customers", uid_, "name"),
+      loadRows("sales", uid_, "date"),
+      loadRows("payments", uid_, "date"),
+      loadRows("sale_items", uid_),
+      loadRows("expenses", uid_).catch(error=>{
+        console.error("تعذر تحميل المصاريف", error);
+        return null;
+      }),
     ]);
-    [productsRes, customersRes, salesRes, paymentsRes, itemsRes].forEach(r=>{ if(r.error) throw r.error; });
+    if(session?.user.id !== uid_) return;
 
     const itemsBySale = {};
-    (itemsRes.data||[]).forEach(it=>{
+    items.forEach(it=>{
       (itemsBySale[it.sale_id] ||= []).push({
         productId: it.product_id, name: it.name, qty: Number(it.qty),
         sellPrice: Number(it.sell_price), buyPrice: Number(it.buy_price),
@@ -434,25 +458,26 @@ async function loadData(){
     });
 
     state.data = {
-      products: (productsRes.data||[]).map(p=>({
+      products: products.map(p=>({
         id: p.id, name: p.name, code: p.code||"", buyPrice: Number(p.buy_price),
         sellPrice: Number(p.sell_price), qty: Number(p.qty), imageUrl: p.image_url||"",
       })),
-      customers: (customersRes.data||[]).map(c=>({
+      customers: customers.map(c=>({
         id: c.id, name: c.name, phone: c.phone||"", location: c.location||"", note: c.note||"",
       })),
-      sales: (salesRes.data||[]).map(s=>({
+      sales: sales.map(s=>({
         id: s.id, date: s.date, customerId: s.customer_id, total: Number(s.total),
         discount: Number(s.discount), paid: Number(s.paid), items: itemsBySale[s.id]||[],
       })),
-      payments: (paymentsRes.data||[]).map(p=>({
+      payments: payments.map(p=>({
         id: p.id, customerId: p.customer_id, saleId: p.sale_id, amount: Number(p.amount),
         date: p.date, note: p.note||"",
       })),
+      expenses: expenses?.map(e=>({id:e.id, name:e.name, amount:Number(e.amount), date:e.date})) ?? null,
     };
   }catch(e){
     console.error("تعذر تحميل البيانات", e);
-    state.data = { products:[], customers:[], sales:[], payments:[] };
+    state.data = { products:[], customers:[], sales:[], payments:[], expenses:null };
     flashSaveError();
   }
   state.ready = true;
@@ -469,8 +494,13 @@ async function persist(next){
     const jobs = [];
     if(next.products  !== prev.products)  jobs.push(syncProducts(prev.products, next.products, uid_));
     if(next.customers !== prev.customers) jobs.push(syncCustomers(prev.customers, next.customers, uid_));
-    if(next.sales     !== prev.sales)     jobs.push(syncSales(prev.sales, next.sales, uid_));
-    if(next.payments  !== prev.payments)  jobs.push(syncPayments(prev.payments, next.payments, uid_));
+    if(next.sales !== prev.sales){
+      jobs.push(syncSales(prev.sales, next.sales, uid_).then(()=>{
+        if(next.payments !== prev.payments) return syncPayments(prev.payments, next.payments, uid_);
+      }));
+    } else if(next.payments !== prev.payments){
+      jobs.push(syncPayments(prev.payments, next.payments, uid_));
+    }
     await Promise.all(jobs);
   }catch(e){
     console.error("تعذر الحفظ في قاعدة البيانات", e);
@@ -478,15 +508,81 @@ async function persist(next){
   }
 }
 
+function paymentSummary(){
+  const bySale = new Map();
+  const byCustomer = new Map();
+  const salesByCustomer = new Map();
+  const receipts = [...state.data.payments];
+
+  for(const sale of state.data.sales){
+    bySale.set(sale.id, {paid:0, payments:[]});
+    if(sale.customerId){
+      if(!salesByCustomer.has(sale.customerId)) salesByCustomer.set(sale.customerId, []);
+      salesByCustomer.get(sale.customerId).push(sale);
+    }
+  }
+
+  const latestFirst = (a,b)=>new Date(b.date)-new Date(a.date);
+  function creditInvoice(invoice, payment, amount){
+    invoice.paid += amount;
+    invoice.payments.push({...payment, amount});
+  }
+
+  for(const payment of receipts){
+    const invoice = bySale.get(payment.saleId);
+    if(invoice) creditInvoice(invoice, payment, payment.amount);
+  }
+
+  // Some older sales only store the amount paid in the sale itself.
+  for(const sale of state.data.sales){
+    const invoice = bySale.get(sale.id);
+    if(!invoice.payments.length && sale.paid>0){
+      const receipt = {saleId:sale.id, customerId:sale.customerId, amount:sale.paid, date:sale.date};
+      receipts.push(receipt);
+      creditInvoice(invoice, receipt, receipt.amount);
+    }
+  }
+
+  const receiptsByCustomer = new Map();
+  for(const receipt of receipts.sort(latestFirst)){
+    if(!receipt.customerId) continue;
+    if(!receiptsByCustomer.has(receipt.customerId)) receiptsByCustomer.set(receipt.customerId, []);
+    receiptsByCustomer.get(receipt.customerId).push(receipt);
+  }
+
+  for(const customer of state.data.customers){
+    const sales = (salesByCustomer.get(customer.id) || []).sort((a,b)=>latestFirst(b,a));
+    const payments = receiptsByCustomer.get(customer.id) || [];
+    const charged = sales.reduce((sum,sale)=>sum+sale.total,0);
+    const paid = payments.reduce((sum,payment)=>sum+payment.amount,0);
+    const remaining = Math.max(charged-paid,0);
+    let status = "بلا مبيعات";
+    if(charged>0) status = remaining===0 ? "مدفوع" : paid>0 ? "دفع جزئي" : "غير مدفوع";
+    byCustomer.set(customer.id, {sales, payments, charged, paid, remaining, status});
+
+    // Account payments without an invoice settle the oldest open invoice first.
+    const accountPayments = payments.filter(p=>!p.saleId).reverse();
+    let invoiceIndex = 0;
+    for(const payment of accountPayments){
+      let unallocated = payment.amount;
+      while(unallocated>0 && invoiceIndex<sales.length){
+        const sale = sales[invoiceIndex];
+        const invoice = bySale.get(sale.id);
+        const due = Math.max(sale.total-invoice.paid,0);
+        const amount = Math.min(unallocated,due);
+        if(amount>0) creditInvoice(invoice,payment,amount);
+        unallocated -= amount;
+        if(amount===due) invoiceIndex++;
+      }
+    }
+  }
+
+  for(const invoice of bySale.values()) invoice.payments.sort(latestFirst);
+  return {bySale, byCustomer, receipts};
+}
+
 function debtByCustomer(){
-  const map = {};
-  state.data.customers.forEach(c=>{
-    const charged = state.data.sales.filter(s=>s.customerId===c.id).reduce((a,s)=>a+s.total,0);
-    const paid = state.data.payments.filter(p=>p.customerId===c.id).reduce((a,p)=>a+p.amount,0);
-    const pays = state.data.payments.filter(p=>p.customerId===c.id).sort((a,b)=>new Date(b.date)-new Date(a.date));
-    map[c.id] = { charged, paid, remaining: charged-paid, lastPay: pays[0]?pays[0].date:null };
-  });
-  return map;
+  return Object.fromEntries(paymentSummary().byCustomer);
 }
 
 function render(){
@@ -820,32 +916,50 @@ function confirmSale(){
 }
 
 /* ---------------- CUSTOMERS ---------------- */
-function renderCustomers(){
-  const dbc = debtByCustomer();
-  let list = state.data.customers.filter(c=>c.name.includes(ui.customerQuery) || (c.phone||"").includes(ui.customerQuery));
-  if(ui.customerSort==="debt") list.sort((a,b)=>(dbc[b.id]?.remaining||0)-(dbc[a.id]?.remaining||0));
-  else list.sort((a,b)=>a.name.localeCompare(b.name,"ar"));
+function renderCustomers(keepFocus=false){
+  const {byCustomer} = paymentSummary();
+  const list = state.data.customers.filter(c=>{
+    const {status, remaining} = byCustomer.get(c.id);
+    const matchesQuery = c.name.includes(ui.customerQuery) || c.phone.includes(ui.customerQuery);
+    return matchesQuery && (
+      ui.customerFilter==="all" ||
+      (ui.customerFilter==="due" && remaining>0) ||
+      (ui.customerFilter==="paid" && status==="مدفوع")
+    );
+  }).sort((a,b)=>byCustomer.get(b.id).remaining-byCustomer.get(a.id).remaining || a.name.localeCompare(b.name,"ar"));
+  const filters = [["all","الكل"],["due","عليهم دين"],["paid","مسدّدين"]];
 
   document.getElementById("content").innerHTML = `
     <div class="topbar"><h1>العملاء والديون</h1><button class="btn btn-primary" id="add-customer">+ عميل</button></div>
-    <div class="search"><span class="ic">🔍</span><input id="customer-search" placeholder="بحث بالاسم أو رقم الهاتف" value="${esc(ui.customerQuery)}"></div>
+    <div class="search"><span class="ic">🔍</span><input id="customer-search" aria-label="بحث عن عميل" placeholder="بحث بالاسم أو رقم الهاتف" value="${esc(ui.customerQuery)}"></div>
     <div class="sort-row">
-      <button class="sort-chip ${ui.customerSort==='debt'?'active':''}" data-sort="debt">الأكثر دينًا</button>
-      <button class="sort-chip ${ui.customerSort==='name'?'active':''}" data-sort="name">الاسم أبجديًا</button>
+      ${filters.map(([value,label])=>`<button class="sort-chip ${ui.customerFilter===value?"active":""}" data-debt-filter="${value}" aria-pressed="${ui.customerFilter===value}">${label}</button>`).join("")}
     </div>
     ${list.length===0 ? '<div class="empty">لا يوجد عملاء مطابقين.</div>' :
       list.map(c=>{
-        const d = dbc[c.id]||{remaining:0,lastPay:null};
-        return `<button class="customer-row" data-open-customer="${c.id}">
-          <div class="left"><b>${esc(c.name)}</b><div class="phone">${c.phone?('📞 '+esc(c.phone)):''}</div></div>
-          <div class="right"><div class="amt" style="color:${d.remaining>0?'var(--rose)':'var(--emerald)'}">${fmt(Math.max(d.remaining,0))} ${CURRENCY}</div>
-          <div class="last">${d.lastPay?('آخر دفعة '+fmtDate(d.lastPay)):'لا دفعات'}</div></div>
+        const d = byCustomer.get(c.id);
+        const tone = d.remaining>0 ? "rose" : d.status==="مدفوع" ? "emerald" : "";
+        const last = d.payments[0];
+        return `<button class="customer-row" data-open-customer="${esc(c.id)}">
+          <div class="left"><b>${esc(c.name)}</b><div class="phone">${esc(c.phone)}</div></div>
+          <div class="right"><div class="amt">المتبقي ${fmt(d.remaining)} ${CURRENCY}</div>
+          <div class="last ${tone}">${d.status}</div>
+          ${last ? `<div class="last">آخر دفعة ${fmt(last.amount)} ${CURRENCY} · ${fmtDate(last.date)}</div>` : ""}
+          </div>
         </button>`;
       }).join("")}
   `;
   document.getElementById("add-customer").onclick = openCustomerForm;
-  document.getElementById("customer-search").oninput = (e)=>{ ui.customerQuery=e.target.value; renderCustomers(); };
-  document.querySelectorAll("[data-sort]").forEach(b=>b.onclick=()=>{ ui.customerSort=b.dataset.sort; renderCustomers(); });
+  const search = document.getElementById("customer-search");
+  search.oninput = ()=>{ ui.customerQuery=search.value; renderCustomers(true); };
+  if(keepFocus){
+    search.focus();
+    search.setSelectionRange(search.value.length,search.value.length);
+  }
+  document.querySelectorAll("[data-debt-filter]").forEach(b=>b.onclick=()=>{
+    ui.customerFilter=b.dataset.debtFilter;
+    renderCustomers();
+  });
   document.querySelectorAll("[data-open-customer]").forEach(b=>b.onclick=()=>openCustomerDetail(b.dataset.openCustomer));
 }
 
@@ -870,54 +984,71 @@ function openCustomerForm(){
 
 function openCustomerDetail(id){
   const c = state.data.customers.find(x=>x.id===id);
-  const dbc = debtByCustomer();
-  const d = dbc[id] || {charged:0,paid:0,remaining:0};
-  const history = [
-    ...state.data.payments.filter(p=>p.customerId===id).map(p=>({...p,isSale:false})),
-    ...state.data.sales.filter(s=>s.customerId===id).map(s=>({...s,isSale:true})),
-  ].sort((a,b)=>new Date(b.date)-new Date(a.date));
+  if(!c) return;
+  const {byCustomer, bySale} = paymentSummary();
+  const d = byCustomer.get(id);
+  const sales = [...d.sales].reverse();
 
   openSheet(c.name, `
     <div style="font-size:12.5px;color:var(--muted);margin-bottom:10px;">
       ${c.phone?`<div>📞 ${esc(c.phone)}</div>`:""}
       ${c.location?`<div>📍 ${esc(c.location)}</div>`:""}
-      ${c.note?`<div style="color:#B9BCB4;margin-top:4px;">${esc(c.note)}</div>`:""}
+      ${c.note?`<div>${esc(c.note)}</div>`:""}
     </div>
     <div class="summary-card">
       <div class="kv"><span class="k">المبلغ الكلي</span><span class="v">${fmt(d.charged)} ${CURRENCY}</span></div>
       <div class="kv"><span class="k">المدفوع</span><span class="v">${fmt(d.paid)} ${CURRENCY}</span></div>
-      <div class="kv"><span class="k">المتبقي</span><span class="v" style="color:var(--rose)">${fmt(Math.max(d.remaining,0))} ${CURRENCY}</span></div>
+      <div class="kv"><span class="k">المتبقي على العميل</span><span class="v ${d.remaining>0?"rose":"emerald"}">${fmt(d.remaining)} ${CURRENCY}</span></div>
     </div>
     ${d.remaining>0 ? `
-      <div style="display:flex;gap:8px;margin-bottom:16px;">
-        <input class="in" id="pay-amount" type="number" inputmode="decimal" placeholder="مبلغ الدفعة" style="flex:1">
+      <form id="customer-payment-form" style="display:flex;gap:8px;margin-bottom:16px;">
+        <input class="in" id="pay-amount" type="number" step="1" min="1" max="${d.remaining}" inputmode="numeric" aria-label="مبلغ الدفعة" placeholder="مبلغ الدفعة" required style="flex:1">
         <button class="btn btn-primary" id="record-payment">تسجيل دفعة</button>
-      </div>` : ""}
-    <div class="section-title" style="margin-top:0">السجل</div>
-    <div>
-    ${history.length===0 ? '<div class="empty">لا يوجد سجل بعد.</div>' :
-      history.map(h=>`<div class="history-row" ${h.isSale?`data-view-sale="${h.id}"`:""}>
-        <span class="date">🕒 ${fmtDate(h.date)}</span>
-        ${h.isSale ? `<span>فاتورة بقيمة ${fmt(h.total)} ${CURRENCY} ›</span>` : `<span class="amt pay">دفعة ${fmt(h.amount)} ${CURRENCY}</span>`}
-      </div>`).join("")}
-    </div>
+      </form>` : ""}
+    <div class="section-title">الفواتير والمنتجات</div>
+    ${sales.length ? sales.map(s=>`
+      <button class="history-row invoice-row" data-view-sale="${esc(s.id)}">
+        <span class="grow"><b>${fmtDate(s.date)}</b>${s.items.map(it=>`<span class="sub" style="display:block">${esc(it.name)} × ${fmt(it.qty)}</span>`).join("")}</span>
+        <span>${fmt(s.total)} ${CURRENCY}<span class="sub" style="display:block">المتبقي ${fmt(Math.max(s.total-bySale.get(s.id).paid,0))}</span></span>
+      </button>`).join("") : '<div class="empty">لا توجد فواتير.</div>'}
+    <div class="section-title">آخر الدفعات</div>
+    ${paymentRows(d.payments)}
   `);
-  if(d.remaining>0){
-    document.getElementById("record-payment").onclick = ()=>{
-      const amt = Number(document.getElementById("pay-amount").value);
-      if(!amt || amt<=0) return;
-      const payments = [...state.data.payments, {id:uid(), customerId:id, amount:amt, date:new Date().toISOString(), note:"دفعة يدوية"}];
-      closeModal();
-      persist({...state.data, payments});
-    };
-  }
-  document.querySelectorAll("[data-view-sale]").forEach(row=>row.onclick=()=>openInvoiceDetail(row.dataset.viewSale));
+  const form = document.getElementById("customer-payment-form");
+  if(form) form.onsubmit = async (event)=>{
+    event.preventDefault();
+    const amt = Number(document.getElementById("pay-amount").value);
+    if(!Number.isSafeInteger(amt) || amt<1 || amt>d.remaining || !session) return;
+    const btn = document.getElementById("record-payment");
+    btn.disabled = true;
+    const owner = session.user.id;
+    const payment = {id:uid(), customerId:id, amount:amt, date:new Date().toISOString(), note:"دفعة يدوية"};
+    try{
+      await syncPayments([], [payment], owner);
+      if(session?.user.id !== owner) return;
+      state.data.payments = [...state.data.payments, payment];
+      render();
+      if(form.isConnected && document.getElementById("modal-root").classList.contains("open")) openCustomerDetail(id);
+    }catch(error){
+      console.error("تعذر تسجيل الدفعة",error);
+      flashSaveError();
+      btn.disabled = false;
+    }
+  };
+  document.querySelectorAll("[data-view-sale]").forEach(row=>row.onclick=()=>openInvoiceDetail(row.dataset.viewSale,id));
+}
+
+function paymentRows(payments){
+  return payments.length ? payments.map(p=>`
+    <div class="history-row static"><span class="date">${fmtDateTime(p.date)}</span>
+    <span class="amt pay">${fmt(p.amount)} ${CURRENCY}</span></div>`).join("") : '<div class="empty">لا توجد دفعات.</div>';
 }
 
 /* ---------------- INVOICES ---------------- */
 function openInvoiceList(){ renderInvoiceListSheet(""); }
-function renderInvoiceListSheet(query){
+function renderInvoiceListSheet(query, keepFocus=false){
   ui.invoiceQuery = query;
+  const {bySale, byCustomer} = paymentSummary();
   const cmap = Object.fromEntries(state.data.customers.map(c=>[c.id,c.name]));
   const list = [...state.data.sales]
     .filter(s=>{
@@ -928,45 +1059,70 @@ function renderInvoiceListSheet(query){
   openSheet("كل الفواتير", `
     <div class="search"><span class="ic">🔍</span><input class="in" id="invoice-search" placeholder="بحث باسم العميل..." value="${esc(query)}" style="padding-right:38px"></div>
     ${list.length===0 ? '<div class="empty">لا توجد فواتير بعد.</div>' :
-      list.map(s=>`<div class="history-row" data-view-sale="${s.id}">
-        <span class="date">🕒 ${fmtDateTime(s.date)} · ${s.customerId?esc(cmap[s.customerId]||"—"):"نقدي"}</span>
-        <span>${fmt(s.total)} ${CURRENCY} ${s.total-s.paid>0?`<span style="color:var(--rose)">(متبقي ${fmt(s.total-s.paid)})</span>`:""} ›</span>
-      </div>`).join("")}
+      list.map(s=>{
+        const invoice = bySale.get(s.id);
+        const last = invoice.payments[0];
+        const customer = byCustomer.get(s.customerId);
+        return `<button class="history-row invoice-row" data-view-sale="${esc(s.id)}">
+          <span class="grow"><b>${s.customerId?esc(cmap[s.customerId]||"—"):"نقدي"}</b>
+            <span class="sub" style="display:block">${fmtDateTime(s.date)}</span>
+            <span class="sub" style="display:block">${last ? `آخر دفعة ${fmt(last.amount)} ${CURRENCY} · ${fmtDate(last.date)}` : "لا توجد دفعات"}</span>
+          </span>
+          <span style="text-align:left">${fmt(s.total)} ${CURRENCY}
+            <span class="sub" style="display:block">متبقي الفاتورة ${fmt(Math.max(s.total-invoice.paid,0))}</span>
+            ${customer ? `<span class="sub" style="display:block">متبقي العميل ${fmt(customer.remaining)}</span>` : ""}
+          </span>
+        </button>`;
+      }).join("")}
   `);
-  document.getElementById("invoice-search").oninput = (e)=>renderInvoiceListSheet(e.target.value);
+  const search = document.getElementById("invoice-search");
+  search.oninput = ()=>renderInvoiceListSheet(search.value,true);
+  if(keepFocus){
+    search.focus();
+    search.setSelectionRange(search.value.length,search.value.length);
+  }
   document.querySelectorAll("[data-view-sale]").forEach(row=>row.onclick=()=>openInvoiceDetail(row.dataset.viewSale));
 }
 
-function openInvoiceDetail(saleId){
+function openInvoiceDetail(saleId, fromCustomer){
   const s = state.data.sales.find(x=>x.id===saleId);
   if(!s) return;
-  const cmap = Object.fromEntries(state.data.customers.map(c=>[c.id,c.name]));
-  const remaining = s.total - s.paid;
+  const customer = state.data.customers.find(c=>c.id===s.customerId);
+  const {bySale, byCustomer} = paymentSummary();
+  const invoice = bySale.get(saleId);
+  const remaining = Math.max(s.total-invoice.paid,0);
   openSheet("تفاصيل الفاتورة", `
-    <button class="back-x" id="back-to-list" style="margin-bottom:12px">‹ رجوع لكل الفواتير</button>
+    <button class="back-x" id="back-to-list" style="margin-bottom:12px">${fromCustomer ? "‹ رجوع للعميل" : "‹ رجوع لكل الفواتير"}</button>
     <div class="summary-card">
       <div class="kv"><span class="k">التاريخ</span><span class="v">${fmtDateTime(s.date)}</span></div>
-      <div class="kv"><span class="k">العميل</span><span class="v">${s.customerId?esc(cmap[s.customerId]||"—"):"نقدي"}</span></div>
+      <div class="kv"><span class="k">العميل</span><span class="v">${customer?esc(customer.name):"نقدي"}</span></div>
     </div>
     <div class="section-title" style="margin-top:0">المنتجات</div>
-    ${s.items.map(it=>`<div class="history-row"><span>${esc(it.name)} × ${it.qty}</span><span>${fmt(it.sellPrice*it.qty)} ${CURRENCY}</span></div>`).join("")}
+    ${s.items.map(it=>`<div class="history-row static"><span>${esc(it.name)} × ${fmt(it.qty)}</span><span>${fmt(it.sellPrice*it.qty)} ${CURRENCY}</span></div>`).join("")}
     <div class="summary-card" style="margin-top:12px">
       ${s.discount>0?`<div class="kv"><span class="k">الخصم</span><span class="v">- ${fmt(s.discount)} ${CURRENCY}</span></div>`:""}
-      <div class="kv"><span class="k">الإجمالي</span><span class="v">${fmt(s.total)} ${CURRENCY}</span></div>
-      <div class="kv"><span class="k">المدفوع</span><span class="v">${fmt(s.paid)} ${CURRENCY}</span></div>
-      <div class="kv"><span class="k">المتبقي</span><span class="v" style="color:${remaining>0?'var(--rose)':'var(--emerald)'}">${fmt(Math.max(remaining,0))} ${CURRENCY}</span></div>
+      <div class="kv"><span class="k">إجمالي الفاتورة</span><span class="v">${fmt(s.total)} ${CURRENCY}</span></div>
+      <div class="kv"><span class="k">المدفوع للفاتورة</span><span class="v">${fmt(invoice.paid)} ${CURRENCY}</span></div>
+      <div class="kv"><span class="k">متبقي الفاتورة</span><span class="v ${remaining>0?"rose":"emerald"}">${fmt(remaining)} ${CURRENCY}</span></div>
+      ${customer ? `<div class="kv"><span class="k">متبقي العميل</span><span class="v">${fmt(byCustomer.get(customer.id).remaining)} ${CURRENCY}</span></div>` : ""}
     </div>
-    <div style="display:flex;gap:8px;">
+    <div class="section-title">دفعات الفاتورة</div>
+    ${paymentRows(invoice.payments)}
+    <div style="display:flex;gap:8px;margin-top:14px;">
       <button class="btn btn-secondary" style="flex:1" id="edit-invoice">تعديل الفاتورة</button>
       ${ui.confirmDeleteInvoiceId===saleId
         ? `<button class="btn btn-danger" style="flex:1" id="confirm-del-invoice">اضغط للتأكيد</button>`
         : `<button class="btn btn-ghost" style="flex:1" id="ask-del-invoice">حذف الفاتورة</button>`}
     </div>
   `);
-  document.getElementById("back-to-list").onclick = ()=>renderInvoiceListSheet(ui.invoiceQuery);
+  document.getElementById("back-to-list").onclick = ()=>{
+    ui.confirmDeleteInvoiceId = null;
+    if(fromCustomer) openCustomerDetail(fromCustomer);
+    else renderInvoiceListSheet(ui.invoiceQuery);
+  };
   document.getElementById("edit-invoice").onclick = ()=>editInvoice(saleId);
   const askBtn = document.getElementById("ask-del-invoice");
-  if(askBtn) askBtn.onclick = ()=>{ ui.confirmDeleteInvoiceId=saleId; openInvoiceDetail(saleId); };
+  if(askBtn) askBtn.onclick = ()=>{ ui.confirmDeleteInvoiceId=saleId; openInvoiceDetail(saleId, fromCustomer); };
   const confirmBtn = document.getElementById("confirm-del-invoice");
   if(confirmBtn) confirmBtn.onclick = ()=>{
     const products = state.data.products.map(p=>{
@@ -1001,28 +1157,33 @@ function renderReports(){
   const inPeriod = (dateStr)=>{
     if(period==="day") return isSameDay(dateStr, todayISO());
     if(period==="week") return isWithinDays(dateStr, 7);
-    return isSameMonth(dateStr, todayISO());
+    if(period==="month") return isSameMonth(dateStr, todayISO());
+    return true;
   };
   const sales = state.data.sales.filter(s=>inPeriod(s.date));
   const totalSales = sales.reduce((a,s)=>a+s.total,0);
+  const {byCustomer, receipts} = paymentSummary();
+  const collected = receipts.filter(p=>inPeriod(p.date)).reduce((sum,p)=>sum+p.amount,0);
+  const expenses = state.data.expenses?.filter(e=>inPeriod(e.date))
+    .sort((a,b)=>new Date(b.date)-new Date(a.date)) ?? null;
+  const spent = expenses?.reduce((sum,e)=>sum+e.amount,0);
   const totalProfit = sales.reduce((a,s)=>a+s.items.reduce((x,it)=>x+(it.sellPrice-it.buyPrice)*it.qty,0)-(s.discount||0),0);
   const productCount = {};
   sales.forEach(s=>s.items.forEach(it=>{ productCount[it.name]=(productCount[it.name]||0)+it.qty; }));
   const sortedProducts = Object.entries(productCount).sort((a,b)=>b[1]-a[1]);
   const topProduct = sortedProducts[0] ? `${sortedProducts[0][0]} (${sortedProducts[0][1]})` : "—";
 
-  const dbc = debtByCustomer();
   const cmap = Object.fromEntries(state.data.customers.map(c=>[c.id,c.name]));
-  const topDebtorEntry = Object.entries(dbc).sort((a,b)=>b[1].remaining-a[1].remaining)[0];
+  const topDebtorEntry = [...byCustomer].sort((a,b)=>b[1].remaining-a[1].remaining)[0];
   const topDebtor = (topDebtorEntry && topDebtorEntry[1].remaining>0) ? cmap[topDebtorEntry[0]] : "لا يوجد";
-  const totalDebt = Object.values(dbc).reduce((a,x)=>a+Math.max(x.remaining,0),0);
+  const totalDebt = [...byCustomer.values()].reduce((a,x)=>a+x.remaining,0);
 
   // last 7 days trend data
   const days = [];
   for(let i=6;i>=0;i--){
     const d = new Date(); d.setDate(d.getDate()-i);
-    const iso = d.toISOString().slice(0,10);
-    const total = state.data.sales.filter(s=>s.date.slice(0,10)===iso).reduce((a,s)=>a+s.total,0);
+    const iso = localDay(d);
+    const total = state.data.sales.filter(s=>isSameDay(s.date,iso)).reduce((a,s)=>a+s.total,0);
     days.push({ label: d.toLocaleDateString("ar-EG",{weekday:"short"}), total });
   }
   const topProductsChartData = sortedProducts.slice(0,5);
@@ -1033,15 +1194,26 @@ function renderReports(){
       <button data-period="day" class="${period==='day'?'active':''}">اليوم</button>
       <button data-period="week" class="${period==='week'?'active':''}">هذا الأسبوع</button>
       <button data-period="month" class="${period==='month'?'active':''}">هذا الشهر</button>
+      <button data-period="all" class="${period==='all'?'active':''}">الكل</button>
     </div>
     <div class="grid2" style="margin-bottom:14px">
-      <div class="stat-box"><div class="val">${fmt(totalSales)} ${CURRENCY}</div><div class="lbl">المبيعات</div></div>
-      <div class="stat-box"><div class="val">${fmt(totalProfit)} ${CURRENCY}</div><div class="lbl">الربح</div></div>
+      <div class="stat-box"><div class="val">${fmt(totalSales)} ${CURRENCY}</div><div class="lbl">إجمالي الإيرادات</div></div>
+      <div class="stat-box"><div class="val">${fmt(collected)} ${CURRENCY}</div><div class="lbl">المبالغ المحصّلة</div></div>
+      <div class="stat-box"><div class="val">${expenses ? fmt(spent)+" "+CURRENCY : "—"}</div><div class="lbl">المصاريف</div></div>
+      <div class="stat-box"><div class="val">${expenses ? fmt(collected-spent)+" "+CURRENCY : "—"}</div><div class="lbl">المحصّل بعد المصاريف</div></div>
+    </div>
+    <div class="section-title">المصاريف ${expenses ? '<button class="btn btn-secondary" id="add-expense">+ مصروف</button>' : ""}</div>
+    ${!expenses ? '<div class="notice">تعذّر تحميل المصاريف. حدّث الصفحة للمحاولة مرة ثانية.</div>' :
+      expenses.length ? expenses.map(e=>`<div class="history-row static"><span class="grow"><b>${esc(e.name)}</b><span class="sub" style="display:block">${fmtDate(e.date)}</span></span><span class="amt">${fmt(e.amount)} ${CURRENCY}</span></div>`).join("") :
+      '<div class="empty">لا توجد مصاريف بالفترة المحددة.</div>'}
+    <div class="section-title">ملخّص المبيعات</div>
+    <div class="grid2" style="margin-bottom:14px">
+      <div class="stat-box"><div class="val">${fmt(totalProfit)} ${CURRENCY}</div><div class="lbl">ربح البيع قبل المصاريف</div></div>
       <div class="stat-box"><div class="val small">${esc(topProduct)}</div><div class="lbl">أكثر منتج مبيعًا</div></div>
       <div class="stat-box"><div class="val small">${esc(topDebtor)}</div><div class="lbl">أكثر عميل عليه دين</div></div>
     </div>
     <div class="chart-card"><div class="ct">اتجاه المبيعات آخر 7 أيام</div><canvas id="trend-chart" height="160"></canvas></div>
-    <div class="chart-card"><div class="ct">أكثر المنتجات مبيعًا (${period==='day'?'اليوم':period==='week'?'هذا الأسبوع':'هذا الشهر'})</div>
+    <div class="chart-card"><div class="ct">أكثر المنتجات مبيعًا (${{day:"اليوم",week:"هذا الأسبوع",month:"هذا الشهر",all:"كل الفترات"}[period]})</div>
       ${topProductsChartData.length===0 ? '<div class="empty">لا توجد مبيعات في هذه الفترة بعد.</div>' : '<canvas id="top-products-chart" height="180"></canvas>'}
     </div>
     <div class="summary-card">
@@ -1049,6 +1221,8 @@ function renderReports(){
     </div>
   `;
   document.getElementById("open-invoices").onclick = openInvoiceList;
+  const addExpense = document.getElementById("add-expense");
+  if(addExpense) addExpense.onclick = openExpenseForm;
   document.querySelectorAll("[data-period]").forEach(b=>b.onclick=()=>{ ui.reportPeriod=b.dataset.period; renderReports(); });
 
   if(charts.trend) charts.trend.destroy();
@@ -1068,6 +1242,50 @@ function renderReports(){
       options: { indexAxis: "y", plugins:{legend:{display:false}}, scales:{ x:{ beginAtZero:true, grid:{color:"#EAE7E0"} }, y:{ grid:{display:false} } } }
     });
   }
+}
+
+function openExpenseForm(){
+  const expenseId = crypto.randomUUID();
+  openSheet("إضافة مصروف", `
+    <form id="expense-form">
+      <label class="field"><div class="field-label">اسم المصروف</div><input class="in" id="expense-name" maxlength="120" required></label>
+      <label class="field"><div class="field-label">المبلغ (د.ع)</div><input class="in" id="expense-amount" type="number" inputmode="numeric" step="1" min="1" max="99999999999999" required></label>
+      <button class="btn btn-primary btn-block" id="save-expense">حفظ المصروف</button>
+    </form>
+  `);
+  const form = document.getElementById("expense-form");
+  const nameInput = document.getElementById("expense-name");
+  nameInput.focus();
+  nameInput.oninput = ()=>nameInput.setCustomValidity("");
+  form.onsubmit = async (event)=>{
+    event.preventDefault();
+    const name = nameInput.value.trim();
+    if(!name){
+      nameInput.setCustomValidity("اكتب اسم المصروف");
+      nameInput.reportValidity();
+      return;
+    }
+    const amount = Number(document.getElementById("expense-amount").value);
+    if(!Number.isSafeInteger(amount) || amount<1 || !session) return;
+    const owner = session.user.id;
+    const btn = document.getElementById("save-expense");
+    btn.disabled = true;
+    try{
+      const {error:insertError} = await sb.from("expenses")
+        .upsert({id:expenseId,name,amount},{onConflict:"id",ignoreDuplicates:true});
+      if(insertError) throw insertError;
+      const {data,error} = await sb.from("expenses").select("id,name,amount,date").eq("id",expenseId).single();
+      if(error) throw error;
+      if(session?.user.id !== owner) return;
+      state.data.expenses = [...state.data.expenses.filter(e=>e.id!==data.id), {...data, amount:Number(data.amount)}];
+      if(form.isConnected) closeModal();
+      render();
+    }catch(error){
+      console.error("تعذر تسجيل المصروف",error);
+      flashSaveError();
+      btn.disabled = false;
+    }
+  };
 }
 
 /* ---------------- modal + nav plumbing ---------------- */
